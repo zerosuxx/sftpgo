@@ -61,7 +61,7 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort, httpPort int
 	}
 	config.SetHTTPDConfig(httpdConf)
 	telemetryConf := config.GetTelemetryConfig()
-	telemetryConf.BindPort = 0
+	// telemetryConf.BindPort = 0
 	config.SetTelemetryConfig(telemetryConf)
 
 	configurePortableSFTPService(sftpdPort, enabledSSHCommands)
