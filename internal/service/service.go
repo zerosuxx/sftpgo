@@ -285,9 +285,9 @@ func (s *Service) startServices() {
 
 // Wait blocks until the service exits
 func (s *Service) Wait() {
-	if s.PortableMode != 1 {
+	// if s.PortableMode != 1 {
 		registerSignals()
-	}
+	// }
 	<-s.Shutdown
 }
 
