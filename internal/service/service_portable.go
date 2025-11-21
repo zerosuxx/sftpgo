@@ -61,7 +61,7 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort, httpPort int
 	}
 	config.SetHTTPDConfig(httpdConf)
 	telemetryConf := config.GetTelemetryConfig()
-	telemetryConf.BindPort = 0
+	// telemetryConf.BindPort = 0
 	config.SetTelemetryConfig(telemetryConf)
 
 	configurePortableSFTPService(sftpdPort, enabledSSHCommands)
@@ -85,10 +85,22 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort, httpPort int
 		}
 	}
 
-	logger.InfoToConsole("Portable mode ready, user: %q, password: %q, public keys: %v, directory: %q, "+
-		"permissions: %+v, file patterns filters: %+v %v", s.PortableUser.Username,
-		printablePassword, s.PortableUser.PublicKeys, s.getPortableDirToServe(), s.PortableUser.Permissions,
-		s.PortableUser.Filters.FilePatterns, s.getServiceOptionalInfoString())
+	logger.
+		GetLogger().
+		Info().
+		Str("user", s.PortableUser.Username).
+		Str("password", printablePassword).
+		Strs("public_keys", s.PortableUser.PublicKeys).
+		Str("directory", s.getPortableDirToServe()).
+		Interface("permissions", s.PortableUser.Permissions).
+		Interface("file_patterns_filters", s.PortableUser.Filters.FilePatterns).
+		Str("optional_info", strings.Trim(s.getServiceOptionalInfoString(), " ")).
+		Msg("Portable mode ready")
+
+	//logger.InfoToConsole("Portable mode ready, user: %q, password: %q, public keys: %v, directory: %q, "+
+	//	"permissions: %+v, file patterns filters: %+v %v", s.PortableUser.Username,
+	//	printablePassword, s.PortableUser.PublicKeys, s.getPortableDirToServe(), s.PortableUser.Permissions,
+	//	s.PortableUser.Filters.FilePatterns, s.getServiceOptionalInfoString())
 	return nil
 }
 
