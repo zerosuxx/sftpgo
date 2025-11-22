@@ -52,7 +52,7 @@ type Service struct {
 	LogMaxBackups     int
 	LogMaxAge         int
 	PortableMode      int
-	PortableUser      dataprovider.User
+	PortableUsers     []dataprovider.User
 	LogCompress       bool
 	LogLevel          string
 	LogUTCTime        bool
@@ -164,11 +164,13 @@ func (s *Service) initializeServices() error {
 	}
 
 	if s.PortableMode == 1 {
-		// create the user for portable mode
-		err = dataprovider.AddUser(&s.PortableUser, dataprovider.ActionExecutorSystem, "", "")
-		if err != nil {
-			logger.ErrorToConsole("error adding portable user: %v", err)
-			return err
+		// create the users for portable mode
+		for _, u := range s.PortableUsers {
+			err = dataprovider.AddUser(&u, dataprovider.ActionExecutorSystem, "", "")
+			if err != nil {
+				logger.ErrorToConsole("error adding portable user: %v", err)
+				return err
+			}
 		}
 	} else {
 		acmeConfig := config.GetACMEConfig()
@@ -285,9 +287,9 @@ func (s *Service) startServices() {
 
 // Wait blocks until the service exits
 func (s *Service) Wait() {
-	if s.PortableMode != 1 {
-		registerSignals()
-	}
+	// if s.PortableMode != 1 {
+	registerSignals()
+	// }
 	<-s.Shutdown
 }
 

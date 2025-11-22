@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/rs/zerolog"
 	"github.com/sftpgo/sdk"
 
 	"github.com/drakkan/sftpgo/v2/internal/config"
@@ -50,7 +51,7 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort, httpPort int
 	if err != nil {
 		return err
 	}
-	printablePassword := s.configurePortableUser()
+	printablePasswords := s.configurePortableUsers()
 	dataProviderConf := config.GetProviderConf()
 	dataProviderConf.Driver = dataprovider.MemoryDataProviderName
 	dataProviderConf.Name = ""
@@ -61,7 +62,7 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort, httpPort int
 	}
 	config.SetHTTPDConfig(httpdConf)
 	telemetryConf := config.GetTelemetryConfig()
-	telemetryConf.BindPort = 0
+	// telemetryConf.BindPort = 0
 	config.SetTelemetryConfig(telemetryConf)
 
 	configurePortableSFTPService(sftpdPort, enabledSSHCommands)
@@ -85,10 +86,31 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort, httpPort int
 		}
 	}
 
-	logger.InfoToConsole("Portable mode ready, user: %q, password: %q, public keys: %v, directory: %q, "+
-		"permissions: %+v, file patterns filters: %+v %v", s.PortableUser.Username,
-		printablePassword, s.PortableUser.PublicKeys, s.getPortableDirToServe(), s.PortableUser.Permissions,
-		s.PortableUser.Filters.FilePatterns, s.getServiceOptionalInfoString())
+	usernames := zerolog.Arr()
+	publicKeysList := zerolog.Arr()
+	permissionsList := zerolog.Arr()
+	filePatternsFilters := zerolog.Arr()
+	for _, u := range s.PortableUsers {
+		usernames.Str(u.Username)
+		for _, pk := range u.PublicKeys {
+			publicKeysList.Str(pk)
+		}
+		permissionsList.Interface(u.Permissions)
+		filePatternsFilters.Interface(u.Filters.FilePatterns)
+	}
+
+	logger.
+		GetLogger().
+		Info().
+		Array("users", usernames).
+		Array("passwords", printablePasswords).
+		Array("public_keys", publicKeysList).
+		Array("directories", s.getPortableDirToServe()).
+		Array("permissions", permissionsList).
+		Array("file_patterns_filters", filePatternsFilters).
+		Str("optional_info", strings.Trim(s.getServiceOptionalInfoString(), " ")).
+		Msg("Portable mode ready")
+
 	return nil
 }
 
@@ -117,77 +139,92 @@ func (s *Service) getServiceOptionalInfoString() string {
 	return info.String()
 }
 
-func (s *Service) getPortableDirToServe() string {
-	switch s.PortableUser.FsConfig.Provider {
-	case sdk.S3FilesystemProvider:
-		return s.PortableUser.FsConfig.S3Config.KeyPrefix
-	case sdk.GCSFilesystemProvider:
-		return s.PortableUser.FsConfig.GCSConfig.KeyPrefix
-	case sdk.AzureBlobFilesystemProvider:
-		return s.PortableUser.FsConfig.AzBlobConfig.KeyPrefix
-	case sdk.SFTPFilesystemProvider:
-		return s.PortableUser.FsConfig.SFTPConfig.Prefix
-	case sdk.HTTPFilesystemProvider:
-		return "/"
-	default:
-		return s.PortableUser.HomeDir
+func (s *Service) getPortableDirToServe() *zerolog.Array {
+	portableDirs := zerolog.Arr()
+	for _, portableUser := range s.PortableUsers {
+		switch portableUser.FsConfig.Provider {
+		case sdk.S3FilesystemProvider:
+			portableDirs.Str(portableUser.FsConfig.S3Config.KeyPrefix)
+			break
+		case sdk.GCSFilesystemProvider:
+			portableDirs.Str(portableUser.FsConfig.GCSConfig.KeyPrefix)
+			break
+		case sdk.AzureBlobFilesystemProvider:
+			portableDirs.Str(portableUser.FsConfig.AzBlobConfig.KeyPrefix)
+			break
+		case sdk.SFTPFilesystemProvider:
+			portableDirs.Str(portableUser.FsConfig.SFTPConfig.Prefix)
+			break
+		case sdk.HTTPFilesystemProvider:
+			portableDirs.Str("/")
+			break
+		default:
+			portableDirs.Str(portableUser.HomeDir)
+			break
+		}
 	}
+	return portableDirs
 }
 
 // configures the portable user and return the printable password if any
-func (s *Service) configurePortableUser() string {
-	if s.PortableUser.Username == "" {
-		s.PortableUser.Username = "user"
-	}
-	printablePassword := ""
-	if s.PortableUser.Password != "" {
-		printablePassword = "[redacted]"
-	}
-	if len(s.PortableUser.PublicKeys) == 0 && s.PortableUser.Password == "" {
-		var b strings.Builder
-		for i := 0; i < 16; i++ {
-			b.WriteRune(chars[rand.Intn(len(chars))])
+func (s *Service) configurePortableUsers() *zerolog.Array {
+	printablePasswords := zerolog.Arr()
+	for id := range s.PortableUsers {
+		portableUser := &s.PortableUsers[id]
+		if portableUser.Username == "" {
+			portableUser.Username = "user"
 		}
-		s.PortableUser.Password = b.String()
-		printablePassword = s.PortableUser.Password
+		if portableUser.Password != "" {
+			printablePasswords.Str("[redacted]")
+		}
+		if len(portableUser.PublicKeys) == 0 && portableUser.Password == "" {
+			var b strings.Builder
+			for i := 0; i < 16; i++ {
+				b.WriteRune(chars[rand.Intn(len(chars))])
+			}
+			portableUser.Password = b.String()
+			printablePasswords.Str(portableUser.Password)
+		}
+		portableUser.Filters.WebClient = []string{sdk.WebClientSharesDisabled, sdk.WebClientInfoChangeDisabled,
+			sdk.WebClientPubKeyChangeDisabled, sdk.WebClientPasswordChangeDisabled, sdk.WebClientAPIKeyAuthChangeDisabled,
+			sdk.WebClientMFADisabled,
+		}
+		s.configurePortableSecrets(portableUser)
 	}
-	s.PortableUser.Filters.WebClient = []string{sdk.WebClientSharesDisabled, sdk.WebClientInfoChangeDisabled,
-		sdk.WebClientPubKeyChangeDisabled, sdk.WebClientPasswordChangeDisabled, sdk.WebClientAPIKeyAuthChangeDisabled,
-		sdk.WebClientMFADisabled,
-	}
-	s.configurePortableSecrets()
-	return printablePassword
+
+	return printablePasswords
 }
 
-func (s *Service) configurePortableSecrets() {
+func (s *Service) configurePortableSecrets(portableUser *dataprovider.User) {
 	// we created the user before to initialize the KMS so we need to create the secret here
-	switch s.PortableUser.FsConfig.Provider {
+	switch portableUser.FsConfig.Provider {
 	case sdk.S3FilesystemProvider:
-		payload := s.PortableUser.FsConfig.S3Config.AccessSecret.GetPayload()
-		s.PortableUser.FsConfig.S3Config.AccessSecret = getSecretFromString(payload)
+		payload := portableUser.FsConfig.S3Config.AccessSecret.GetPayload()
+		portableUser.FsConfig.S3Config.AccessSecret = getSecretFromString(payload)
 	case sdk.GCSFilesystemProvider:
-		payload := s.PortableUser.FsConfig.GCSConfig.Credentials.GetPayload()
-		s.PortableUser.FsConfig.GCSConfig.Credentials = getSecretFromString(payload)
+		payload := portableUser.FsConfig.GCSConfig.Credentials.GetPayload()
+		portableUser.FsConfig.GCSConfig.Credentials = getSecretFromString(payload)
 	case sdk.AzureBlobFilesystemProvider:
-		payload := s.PortableUser.FsConfig.AzBlobConfig.AccountKey.GetPayload()
-		s.PortableUser.FsConfig.AzBlobConfig.AccountKey = getSecretFromString(payload)
-		payload = s.PortableUser.FsConfig.AzBlobConfig.SASURL.GetPayload()
-		s.PortableUser.FsConfig.AzBlobConfig.SASURL = getSecretFromString(payload)
+		payload := portableUser.FsConfig.AzBlobConfig.AccountKey.GetPayload()
+		portableUser.FsConfig.AzBlobConfig.AccountKey = getSecretFromString(payload)
+		payload = portableUser.FsConfig.AzBlobConfig.SASURL.GetPayload()
+		portableUser.FsConfig.AzBlobConfig.SASURL = getSecretFromString(payload)
 	case sdk.CryptedFilesystemProvider:
-		payload := s.PortableUser.FsConfig.CryptConfig.Passphrase.GetPayload()
-		s.PortableUser.FsConfig.CryptConfig.Passphrase = getSecretFromString(payload)
+		payload := portableUser.FsConfig.CryptConfig.Passphrase.GetPayload()
+		portableUser.FsConfig.CryptConfig.Passphrase = getSecretFromString(payload)
 	case sdk.SFTPFilesystemProvider:
-		payload := s.PortableUser.FsConfig.SFTPConfig.Password.GetPayload()
-		s.PortableUser.FsConfig.SFTPConfig.Password = getSecretFromString(payload)
-		payload = s.PortableUser.FsConfig.SFTPConfig.PrivateKey.GetPayload()
-		s.PortableUser.FsConfig.SFTPConfig.PrivateKey = getSecretFromString(payload)
-		payload = s.PortableUser.FsConfig.SFTPConfig.KeyPassphrase.GetPayload()
-		s.PortableUser.FsConfig.SFTPConfig.KeyPassphrase = getSecretFromString(payload)
+		payload := portableUser.FsConfig.SFTPConfig.Password.GetPayload()
+		portableUser.FsConfig.SFTPConfig.Password = getSecretFromString(payload)
+		payload = portableUser.FsConfig.SFTPConfig.PrivateKey.GetPayload()
+		portableUser.FsConfig.SFTPConfig.PrivateKey = getSecretFromString(payload)
+		payload = portableUser.FsConfig.SFTPConfig.KeyPassphrase.GetPayload()
+		portableUser.FsConfig.SFTPConfig.KeyPassphrase = getSecretFromString(payload)
 	case sdk.HTTPFilesystemProvider:
-		payload := s.PortableUser.FsConfig.HTTPConfig.Password.GetPayload()
-		s.PortableUser.FsConfig.HTTPConfig.Password = getSecretFromString(payload)
-		payload = s.PortableUser.FsConfig.HTTPConfig.APIKey.GetPayload()
-		s.PortableUser.FsConfig.HTTPConfig.APIKey = getSecretFromString(payload)
+		payload := portableUser.FsConfig.HTTPConfig.Password.GetPayload()
+		portableUser.FsConfig.HTTPConfig.Password = getSecretFromString(payload)
+		payload = portableUser.FsConfig.HTTPConfig.APIKey.GetPayload()
+		portableUser.FsConfig.HTTPConfig.APIKey = getSecretFromString(payload)
+	default:
 	}
 }
 

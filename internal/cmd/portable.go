@@ -111,7 +111,7 @@ $ sftpgo portable
 Please take a look at the usage below to customize the serving parameters`,
 		Run: func(_ *cobra.Command, _ []string) {
 			portableDir := directoryToServe
-			fsProvider := dataprovider.GetProviderFromValue(convertFsProvider())
+			fsProvider := dataprovider.GetProviderFromValue(convertFsProvider(portableFsProvider))
 			if !filepath.IsAbs(portableDir) {
 				if fsProvider == sdk.LocalFilesystemProvider {
 					portableDir, _ = filepath.Abs(portableDir)
@@ -119,8 +119,6 @@ Please take a look at the usage below to customize the serving parameters`,
 					portableDir = os.TempDir()
 				}
 			}
-			permissions := make(map[string][]string)
-			permissions["/"] = portablePermissions
 			portableGCSCredentials := ""
 			if fsProvider == sdk.GCSFilesystemProvider && portableGCSCredentialsFile != "" {
 				contents, err := getFileContents(portableGCSCredentialsFile)
@@ -210,83 +208,13 @@ Please take a look at the usage below to customize the serving parameters`,
 				LogUTCTime:    portableLogUTCTime,
 				Shutdown:      make(chan bool),
 				PortableMode:  1,
-				PortableUser: dataprovider.User{
-					BaseUser: sdk.BaseUser{
-						Username:    portableUsername,
-						Password:    pwd,
-						PublicKeys:  portablePublicKeys,
-						Permissions: permissions,
-						HomeDir:     portableDir,
-						Status:      1,
-					},
-					Filters: dataprovider.UserFilters{
-						BaseUserFilters: sdk.BaseUserFilters{
-							FilePatterns:   parsePatternsFilesFilters(),
-							StartDirectory: portableStartDir,
-						},
-					},
-					FsConfig: vfs.Filesystem{
-						Provider: fsProvider,
-						S3Config: vfs.S3FsConfig{
-							BaseS3FsConfig: sdk.BaseS3FsConfig{
-								Bucket:            portableS3Bucket,
-								Region:            portableS3Region,
-								AccessKey:         portableS3AccessKey,
-								RoleARN:           portableS3RoleARN,
-								Endpoint:          portableS3Endpoint,
-								StorageClass:      portableS3StorageClass,
-								ACL:               portableS3ACL,
-								KeyPrefix:         portableS3KeyPrefix,
-								UploadPartSize:    int64(portableS3ULPartSize),
-								UploadConcurrency: portableS3ULConcurrency,
-								ForcePathStyle:    portableS3ForcePathStyle,
-								SkipTLSVerify:     portableS3SkipTLSVerify,
-							},
-							AccessSecret: kms.NewPlainSecret(portableS3AccessSecret),
-						},
-						GCSConfig: vfs.GCSFsConfig{
-							BaseGCSFsConfig: sdk.BaseGCSFsConfig{
-								Bucket:               portableGCSBucket,
-								AutomaticCredentials: portableGCSAutoCredentials,
-								StorageClass:         portableGCSStorageClass,
-								KeyPrefix:            portableGCSKeyPrefix,
-							},
-							Credentials: kms.NewPlainSecret(portableGCSCredentials),
-						},
-						AzBlobConfig: vfs.AzBlobFsConfig{
-							BaseAzBlobFsConfig: sdk.BaseAzBlobFsConfig{
-								Container:           portableAzContainer,
-								AccountName:         portableAzAccountName,
-								Endpoint:            portableAzEndpoint,
-								AccessTier:          portableAzAccessTier,
-								KeyPrefix:           portableAzKeyPrefix,
-								UseEmulator:         portableAzUseEmulator,
-								UploadPartSize:      int64(portableAzULPartSize),
-								UploadConcurrency:   portableAzULConcurrency,
-								DownloadPartSize:    int64(portableAzDLPartSize),
-								DownloadConcurrency: portableAzDLConcurrency,
-							},
-							AccountKey: kms.NewPlainSecret(portableAzAccountKey),
-							SASURL:     kms.NewPlainSecret(portableAzSASURL),
-						},
-						CryptConfig: vfs.CryptFsConfig{
-							Passphrase: kms.NewPlainSecret(portableCryptPassphrase),
-						},
-						SFTPConfig: vfs.SFTPFsConfig{
-							BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-								Endpoint:                portableSFTPEndpoint,
-								Username:                portableSFTPUsername,
-								Fingerprints:            portableSFTPFingerprints,
-								Prefix:                  portableSFTPPrefix,
-								DisableCouncurrentReads: portableSFTPDisableConcurrentReads,
-								BufferSize:              portableSFTPDBufferSize,
-							},
-							Password:      kms.NewPlainSecret(portableSFTPPassword),
-							PrivateKey:    kms.NewPlainSecret(portableSFTPPrivateKey),
-							KeyPassphrase: kms.NewEmptySecret(),
-						},
-					},
-				},
+				PortableUsers: getUsersFromEnv(
+					pwd,
+					portablePublicKeys,
+					portableDir,
+					portableGCSCredentials,
+					portableSFTPPrivateKey,
+				),
 			}
 			err := service.StartPortableMode(portableSFTPDPort, portableFTPDPort, portableWebDAVPort, portableHTTPPort,
 				portableSSHCommands, portableFTPSCert, portableFTPSKey, portableWebDAVCert, portableWebDAVKey,
@@ -455,7 +383,7 @@ interrupt signal.
 	rootCmd.AddCommand(portableCmd)
 }
 
-func parsePatternsFilesFilters() []sdk.PatternsFilter {
+func parsePatternsFilesFilters(portableAllowedPatterns, portableDeniedPatterns []string) []sdk.PatternsFilter {
 	var patterns []sdk.PatternsFilter
 	for _, val := range portableAllowedPatterns {
 		p, exts := getPatternsFilterValues(strings.TrimSpace(val))
@@ -525,7 +453,7 @@ func getFileContents(name string) (string, error) {
 	return util.BytesToString(contents), nil
 }
 
-func convertFsProvider() string {
+func convertFsProvider(portableFsProvider string) string {
 	switch portableFsProvider {
 	case "osfs", "6": // httpfs (6) is not supported in portable mode, so return the default
 		return "0"
@@ -542,4 +470,191 @@ func convertFsProvider() string {
 	default:
 		return portableFsProvider
 	}
+}
+
+func getUsersFromEnv(pwd string, publicKeyFiles []string, homeDir, portableGCSCredentials, portableSFTPPrivateKey string) []dataprovider.User {
+	var users []dataprovider.User
+	i := 0
+	for {
+		userNameEnv, exists := os.LookupEnv(fmt.Sprintf("SFTPGO_PORTABLE__BASE_USER__%d__USERNAME", i))
+		if !exists {
+			if i > 0 {
+				break
+			}
+			userNameEnv = portableUsername
+		}
+
+		users = append(users, dataprovider.User{
+			BaseUser: sdk.BaseUser{
+				Username:    userNameEnv,
+				Password:    getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__BASE_USER__%d__PASSWORD", i), pwd),
+				PublicKeys:  getPublicKeyContents(getEnvListOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__BASE_USER__%d__PUBLIC_KEY_FILES", i), publicKeyFiles)),
+				Permissions: getPermissionsMap(getEnvListOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__BASE_USER__%d__PERMISSIONS", i), portablePermissions)),
+				HomeDir:     getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__BASE_USER__%d__HOME_DIR", i), homeDir),
+				Status:      1,
+			},
+			Filters: dataprovider.UserFilters{
+				BaseUserFilters: sdk.BaseUserFilters{
+					FilePatterns: parsePatternsFilesFilters(
+						getEnvListOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FILTERS__%d__ALLOWED_PATTERNS", i), portableAllowedPatterns),
+						getEnvListOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FILTERS__%d__DENIED_PATTERNS", i), portableDeniedPatterns),
+					),
+					StartDirectory: getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FILTERS__%d__START_DIRECTORY", i), portableStartDir),
+				},
+			},
+			FsConfig: vfs.Filesystem{
+				Provider: dataprovider.GetProviderFromValue(convertFsProvider(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__FS_PROVIDER", i), portableFsProvider))),
+				S3Config: vfs.S3FsConfig{
+					BaseS3FsConfig: sdk.BaseS3FsConfig{
+						Bucket:            getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__BUCKET", i), portableS3Bucket),
+						Region:            getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__REGION", i), portableS3Region),
+						AccessKey:         getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__ACCESS_KEY", i), portableS3AccessKey),
+						RoleARN:           getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__ROLE_ARN", i), portableS3RoleARN),
+						Endpoint:          getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__ENDPOINT", i), portableS3Endpoint),
+						StorageClass:      getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__STORAGE_CLASS", i), portableS3StorageClass),
+						ACL:               getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__ACL", i), portableS3ACL),
+						KeyPrefix:         getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__KEY_PREFIX", i), portableS3KeyPrefix),
+						UploadPartSize:    getEnvInt64OrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__UPLOAD_PART_SIZE", i), int64(portableS3ULPartSize)),
+						UploadConcurrency: getEnvIntOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__UPLOAD_CONCURRENCY", i), portableS3ULConcurrency),
+						ForcePathStyle:    getEnvBoolOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__FORCE_PATH_STYLE", i), portableS3ForcePathStyle),
+						SkipTLSVerify:     getEnvBoolOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__SKIP_TLS_VERIFY", i), portableS3SkipTLSVerify),
+					},
+					AccessSecret: kms.NewPlainSecret(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__S3__ACCESS_SECRET", i), portableS3AccessSecret)),
+				},
+				GCSConfig: vfs.GCSFsConfig{
+					BaseGCSFsConfig: sdk.BaseGCSFsConfig{
+						Bucket:               getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__GCS__BUCKET", i), portableGCSBucket),
+						AutomaticCredentials: getEnvIntOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__GCS__AUTOMATIC_CREDENTIALS", i), portableGCSAutoCredentials),
+						StorageClass:         getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__GCS__STORAGE_CLASS", i), portableGCSStorageClass),
+						KeyPrefix:            getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__GCS__KEY_PREFIX", i), portableGCSKeyPrefix),
+					},
+					Credentials: kms.NewPlainSecret(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__GCS__CREDENTIALS", i), portableGCSCredentials)),
+				},
+				AzBlobConfig: vfs.AzBlobFsConfig{
+					BaseAzBlobFsConfig: sdk.BaseAzBlobFsConfig{
+						Container:           getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__CONTAINER", i), portableAzContainer),
+						AccountName:         getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__ACCOUNT_NAME", i), portableAzAccountName),
+						Endpoint:            getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__ENDPOINT", i), portableAzEndpoint),
+						AccessTier:          getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__ACCESS_TIER", i), portableAzAccessTier),
+						KeyPrefix:           getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__KEY_PREFIX", i), portableAzKeyPrefix),
+						UseEmulator:         getEnvBoolOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__USE_EMULATOR", i), portableAzUseEmulator),
+						UploadPartSize:      getEnvInt64OrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__UPLOAD_PART_SIZE", i), int64(portableAzULPartSize)),
+						UploadConcurrency:   getEnvIntOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__UPLOAD_CONCURRENCY", i), portableAzULConcurrency),
+						DownloadPartSize:    getEnvInt64OrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__DOWNLOAD_PART_SIZE", i), int64(portableAzDLPartSize)),
+						DownloadConcurrency: getEnvIntOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__DOWNLOAD_CONCURRENCY", i), portableAzDLConcurrency),
+					},
+					AccountKey: kms.NewPlainSecret(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__ACCOUNT_KEY", i), portableAzAccountKey)),
+					SASURL:     kms.NewPlainSecret(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__AZBLOB__SAS_URL", i), portableAzSASURL)),
+				},
+				CryptConfig: vfs.CryptFsConfig{
+					Passphrase: kms.NewPlainSecret(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__CRYPT__PASSPHRASE", i), portableCryptPassphrase)),
+				},
+				SFTPConfig: vfs.SFTPFsConfig{
+					BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
+						Endpoint:                getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__ENDPOINT", i), portableSFTPEndpoint),
+						Username:                getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__USERNAME", i), portableSFTPUsername),
+						Fingerprints:            getEnvListOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__FINGERPRINTS", i), portableSFTPFingerprints),
+						Prefix:                  getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__PREFIX", i), portableSFTPPrefix),
+						DisableCouncurrentReads: getEnvBoolOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__DISABLE_CONCURRENT_READS", i), portableSFTPDisableConcurrentReads),
+						BufferSize:              getEnvInt64OrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__BUFFER_SIZE", i), portableSFTPDBufferSize),
+					},
+					Password:      kms.NewPlainSecret(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__PASSWORD", i), portableSFTPPassword)),
+					PrivateKey:    kms.NewPlainSecret(getEnvOrDefault(fmt.Sprintf("SFTPGO_PORTABLE__FS_CONFIG__%d__SFTP__PRIVATE_KEY", i), portableSFTPPrivateKey)),
+					KeyPassphrase: kms.NewEmptySecret(),
+				},
+			},
+		})
+
+		i++
+	}
+
+	return users
+}
+
+func getPublicKeyContents(publicKeyFiles []string) []string {
+	var publicKeys []string
+	if len(publicKeyFiles) > 0 {
+		for _, publicKeyFile := range publicKeyFiles {
+			publicKey, _ := getFileContents(publicKeyFile)
+			publicKeys = append(publicKeys, publicKey)
+		}
+	}
+	return publicKeys
+}
+
+func getEnvOrDefault(envVar, defaultVal string) string {
+	val, exists := os.LookupEnv(envVar)
+	if !exists {
+		return defaultVal
+	}
+	return val
+}
+
+func getEnvListOrDefault(envVar string, defaultVal []string) []string {
+	val, exists := os.LookupEnv(envVar)
+	if !exists {
+		return defaultVal
+	}
+	return strings.Split(val, ",")
+}
+
+func getEnvIntOrDefault(envVar string, defaultVal int) int {
+	val, exists := os.LookupEnv(envVar)
+	if !exists {
+		return defaultVal
+	}
+	return mustParseInt(val)
+}
+
+func getEnvInt64OrDefault(envVar string, defaultVal int64) int64 {
+	val, exists := os.LookupEnv(envVar)
+	if !exists {
+		return defaultVal
+	}
+	return parseInt64(val)
+}
+
+func getEnvBoolOrDefault(envVar string, defaultVal bool) bool {
+	val, exists := os.LookupEnv(envVar)
+	if !exists {
+		return defaultVal
+	}
+	return parseBool(val)
+}
+
+func mustParseInt(s string) int {
+	if s == "" {
+		return 0
+	}
+	var val int
+	_, err := fmt.Sscanf(s, "%d", &val)
+	if err != nil {
+		return 0
+	}
+	return val
+}
+
+func parseBool(s string) bool {
+	if s == "" {
+		return false
+	}
+	val := false
+	_, _ = fmt.Sscanf(s, "%t", &val)
+	return val
+}
+
+func parseInt64(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	val := int64(0)
+	_, _ = fmt.Sscanf(s, "%d", &val)
+	return val
+}
+
+func getPermissionsMap(portablePermissions []string) map[string][]string {
+	permissions := make(map[string][]string)
+	permissions["/"] = portablePermissions
+
+	return permissions
 }
